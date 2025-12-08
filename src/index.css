@@ -1,11 +1,17 @@
 :root {
-  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
   line-height: 1.5;
   font-weight: 400;
 
+  --climb-primary: #ff7f50; /* 活力橙色，像岩点 */
+  --climb-secondary: #2c3e50; /* 深岩石色 */
+  --climb-bg: #f3f4f6; /* 浅灰背景 */
+  --climb-text: #1f2937;
+  --climb-card-bg: #ffffff;
+  
   color-scheme: light dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
+  color: var(--climb-text);
+  background-color: var(--climb-bg);
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -15,18 +21,46 @@
 
 body {
   margin: 0;
-  display: flex;
-  place-items: center;
+  display: block; /* 覆盖之前的 flex */
   min-width: 320px;
   min-height: 100vh;
+  background-color: var(--climb-bg);
+  /* 添加一点岩石质感的背景纹理（可选，这里用简单的噪点模拟，或者纯色更简洁） */
+  background-image: radial-gradient(#e5e7eb 1px, transparent 1px);
+  background-size: 20px 20px;
 }
 
 #root {
   width: 100%;
-  max-width: 1280px;
+  max-width: 600px; /* 限制最大宽度，模拟移动端体验 */
   margin: 0 auto;
-  text-align: center;
   min-height: 100vh;
+}
+
+/* 简单的岩点装饰样式 */
+.rock-hold {
+  position: absolute;
+  border-radius: 40% 60% 70% 30% / 40% 50% 60% 50%;
+  opacity: 0.1;
+  z-index: 0;
+}
+
+.rock-hold-1 {
+  top: -50px;
+  right: -50px;
+  width: 200px;
+  height: 200px;
+  background-color: var(--climb-primary);
+  transform: rotate(45deg);
+}
+
+.rock-hold-2 {
+  bottom: 10%;
+  left: -30px;
+  width: 150px;
+  height: 150px;
+  background-color: var(--climb-secondary);
+  border-radius: 60% 40% 30% 70% / 60% 30% 70% 40%;
 }
 
 @media (prefers-color-scheme: light) {
@@ -35,4 +69,3 @@ body {
     background-color: #ffffff;
   }
 }
-
