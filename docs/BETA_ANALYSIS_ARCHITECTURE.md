@@ -172,23 +172,23 @@ fliplr=0.5,     # 左右翻转
 
 ```
 src/logic/
-├── hold_detector.ts      # Phase 1: 岩点检测 Pipeline
-│   ├── extractKeyFrames()        # 关键帧抽取
-│   ├── detectHoldsMultiFrame()   # 多帧 YOLO 检测
-│   ├── mergeDetections()         # NMS 融合
-│   ├── extractHoldColors()       # 颜色提取
-│   ├── clusterByColor()          # 颜色聚类
-│   └── runHoldDetectionPipeline() # 完整 Pipeline
+├── hold_detector.ts        # Phase 1: 岩点检测
+│   ├── sampleFrames()          # 关键帧抽取
+│   ├── yoloDetect()            # YOLO 检测 (Mock)
+│   ├── mergeDetections()       # 多帧融合
+│   ├── extractColors()         # 颜色提取
+│   ├── clusterByColor()        # 颜色聚类 → 线路
+│   └── detectHolds()           # 完整 Pipeline
 │
-├── route_analyzer.ts     # Phase 2: 实时线路分析
-│   ├── setHoldData()            # 加载 Phase 1 结果
-│   ├── update(pose)             # 每帧更新
-│   ├── findTouchedHold()        # 检测触碰岩点
-│   └── getHint()                # 生成提示
+├── action_recognizer.ts    # Phase 2: 动作识别
+│   ├── setHoldData()           # 加载岩点数据
+│   ├── update(pose)            # 每帧更新
+│   ├── detectAdvancedMoves()   # 高阶动作检测
+│   └── getHint()               # 生成提示
 │
-├── pose_detector.ts      # MoveNet 姿态检测封装
-├── recognizer.ts         # 动作识别状态机
-└── beta_generator.ts     # Beta 文本生成
+├── pose_detector.ts        # MoveNet 姿态检测
+├── beta_generator.ts       # Beta 文本生成
+└── diff_analyzer.ts        # 序列对比分析
 ```
 
 ---
