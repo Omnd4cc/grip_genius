@@ -1,276 +1,610 @@
 /**
- * 岩点检测器
- * 
- * Phase 1: 从视频中检测所有岩点，按颜色分组成线路
+ * 岩点检测器 - 基于 Roboflow API
  * 
  * 流程:
- * 1. 抽取关键帧 (避免人遮挡)
- * 2. YOLO 检测岩点
- * 3. 多帧融合去重
- * 4. 颜色提取 + 聚类
- * 5. 输出线路分组 (自动标记 Top/Start)
+ * 1. 智能帧采样 (开头1帧 + 中间3帧 + 结尾1帧)
+ * 2. 调用 Roboflow API 检测岩点 (已含颜色分类)
+ * 3. 多帧融合校准 (置信度筛选 + 位置去重)
+ * 4. 线路过滤 (去除重合点 + 过滤少于5个点的线路)
+ * 5. 通过中间帧的人体姿态确定当前线路
  */
 
-import { Hold } from '../types';
+import { 
+  detectFromCanvas, 
+  RoboflowPrediction, 
+  getMainColor 
+} from '../api/roboflow';
+import { PoseDetector } from './pose_detector';
+import { Keypoint } from '../types';
+
+// ============ 常量配置 ============
+
+const MIN_HOLDS_PER_ROUTE = 5;  // 线路最少岩点数
+const OVERLAP_THRESHOLD = 35;   // 重合判定距离 (像素)
+
+// 颜色显示名
+const COLOR_NAMES: Record<string, string> = {
+  black: '黑色', blue: '蓝色', brown: '棕色', cyan: '青色',
+  gray: '灰色', green: '绿色', orange: '橙色', pink: '粉色',
+  purple: '紫色', red: '红色', white: '白色', yellow: '黄色',
+};
 
 // ============ 类型定义 ============
 
 export interface DetectedHold {
-  id: string;
+  id: string;                // 如: yellow_1, yellow_TOP
   x: number;
   y: number;
   width: number;
   height: number;
   confidence: number;
-  color?: HSVColor;
-  colorName?: string;
-}
-
-export interface HSVColor {
-  h: number;  // 0-360
-  s: number;  // 0-1
-  v: number;  // 0-1
+  color: string;             // 主颜色 (yellow, green, etc.)
+  colorName: string;         // 显示名 (黄色, 绿色, etc.)
+  colorClass: string;        // 完整类别 (yellow-hold, etc.)
+  points: { x: number; y: number }[];  // 多边形轮廓
+  isTop: boolean;            // 是否为 TOP 点
+  order: number;             // 在线路中的顺序 (从低到高)
 }
 
 export interface Route {
   color: string;
-  colorHSV: HSVColor;
+  colorName: string;
+  colorClass: string;
   holds: DetectedHold[];
-  topHold?: DetectedHold;
-  startHold?: DetectedHold;
+  topHold: DetectedHold | null;
+  startHold: DetectedHold | null;
 }
 
 export interface HoldDetectionResult {
   allHolds: DetectedHold[];
   routes: Route[];
+  activeRoute: Route | null;  // 通过姿态检测确定的当前线路
   frameWidth: number;
   frameHeight: number;
 }
 
-// ============ YOLO 检测 (Mock) ============
-
-/**
- * Mock YOLO 模型调用
- * TODO: 替换为真实的 ONNX Runtime 调用
- */
-async function yoloDetect(imageData: ImageData): Promise<DetectedHold[]> {
-  const { width, height } = imageData;
-  
-  // Mock 数据 - 模拟一条灰色线路和一条黄色线路
-  await new Promise(r => setTimeout(r, 50));
-  
-  return [
-    // 灰色线路
-    { id: '', x: width * 0.3, y: height * 0.15, width: 40, height: 40, confidence: 0.95 },
-    { id: '', x: width * 0.35, y: height * 0.35, width: 45, height: 40, confidence: 0.92 },
-    { id: '', x: width * 0.28, y: height * 0.50, width: 42, height: 42, confidence: 0.90 },
-    { id: '', x: width * 0.40, y: height * 0.65, width: 38, height: 38, confidence: 0.88 },
-    { id: '', x: width * 0.32, y: height * 0.80, width: 50, height: 45, confidence: 0.93 },
-    // 黄色线路
-    { id: '', x: width * 0.65, y: height * 0.12, width: 35, height: 35, confidence: 0.91 },
-    { id: '', x: width * 0.60, y: height * 0.40, width: 40, height: 40, confidence: 0.89 },
-    { id: '', x: width * 0.70, y: height * 0.60, width: 45, height: 42, confidence: 0.87 },
-    { id: '', x: width * 0.62, y: height * 0.85, width: 48, height: 45, confidence: 0.94 },
-  ];
+interface FrameSample {
+  imageData: ImageData;
+  canvas: HTMLCanvasElement;
+  timestamp: number;
+  type: 'start' | 'middle' | 'end';
 }
 
-// ============ 核心函数 ============
+// ============ 帧采样 ============
 
 /**
- * 从视频中采样关键帧
+ * 智能帧采样
  */
-async function sampleFrames(video: HTMLVideoElement, numFrames = 5): Promise<ImageData[]> {
-  const frames: ImageData[] = [];
+async function sampleFrames(video: HTMLVideoElement): Promise<FrameSample[]> {
+  const frames: FrameSample[] = [];
   const duration = video.duration;
-  const points = [0.05, 0.25, 0.5, 0.75, 0.95].slice(0, numFrames);
+  
+  const samplePoints = [
+    { time: Math.min(2.5, duration * 0.1), type: 'start' as const },
+    { time: duration * (1/3), type: 'middle' as const },
+    { time: duration * (1/2), type: 'middle' as const },
+    { time: duration * (2/3), type: 'middle' as const },
+    { time: Math.max(duration - 0.5, duration * 0.9), type: 'end' as const },
+  ];
   
   const canvas = document.createElement('canvas');
   canvas.width = video.videoWidth;
   canvas.height = video.videoHeight;
   const ctx = canvas.getContext('2d')!;
   
-  for (const p of points) {
-    video.currentTime = duration * p;
-    await new Promise<void>(r => { video.onseeked = () => r(); });
+  for (const point of samplePoints) {
+    video.currentTime = point.time;
+    
+    await new Promise<void>(resolve => {
+      const onSeeked = () => {
+        video.removeEventListener('seeked', onSeeked);
+        resolve();
+      };
+      video.addEventListener('seeked', onSeeked);
+    });
+    
     ctx.drawImage(video, 0, 0);
-    frames.push(ctx.getImageData(0, 0, canvas.width, canvas.height));
+    
+    const frameCanvas = document.createElement('canvas');
+    frameCanvas.width = video.videoWidth;
+    frameCanvas.height = video.videoHeight;
+    frameCanvas.getContext('2d')!.drawImage(video, 0, 0);
+    
+    frames.push({
+      imageData: ctx.getImageData(0, 0, canvas.width, canvas.height),
+      canvas: frameCanvas,
+      timestamp: point.time,
+      type: point.type
+    });
   }
   
+  console.log(`[HoldDetector] 采样 ${frames.length} 帧`);
   return frames;
 }
 
-/**
- * 融合多帧检测结果
- */
-function mergeDetections(frameDetections: DetectedHold[][], threshold = 30): DetectedHold[] {
-  const merged: DetectedHold[] = [];
-  let id = 1;
+// ============ 多帧检测 ============
+
+async function detectMultiFrame(
+  frames: FrameSample[],
+  minConfidence: number = 0.5
+): Promise<RoboflowPrediction[][]> {
+  const results: RoboflowPrediction[][] = [];
   
-  for (const holds of frameDetections) {
-    for (const hold of holds) {
-      const existing = merged.find(m =>
-        Math.abs(m.x - hold.x) < threshold && Math.abs(m.y - hold.y) < threshold
+  for (let i = 0; i < frames.length; i++) {
+    console.log(`[HoldDetector] 检测帧 ${i + 1}/${frames.length} (${frames[i].type})...`);
+    
+    try {
+      const predictions = await detectFromCanvas(frames[i].canvas);
+      const filtered = predictions.filter(p => p.confidence >= minConfidence);
+      results.push(filtered);
+      console.log(`[HoldDetector]   检测到 ${predictions.length} 个, 过滤后 ${filtered.length} 个`);
+    } catch (error) {
+      console.error(`[HoldDetector] 帧 ${i + 1} 检测失败:`, error);
+      results.push([]);
+    }
+  }
+  
+  return results;
+}
+
+// ============ 多帧融合 ============
+
+interface MergedHold {
+  predictions: RoboflowPrediction[];
+  avgX: number;
+  avgY: number;
+  frameCount: number;
+  color: string;
+}
+
+function mergeDetections(
+  frameResults: RoboflowPrediction[][],
+  mergeThreshold: number = 40
+): MergedHold[] {
+  const merged: MergedHold[] = [];
+  
+  for (const framePreds of frameResults) {
+    for (const pred of framePreds) {
+      let found = false;
+      const predColor = getMainColor(pred.class);
+      
+      for (const m of merged) {
+        const dist = Math.sqrt(
+          Math.pow(pred.x - m.avgX, 2) + 
+          Math.pow(pred.y - m.avgY, 2)
+        );
+        
+        // 位置接近 且 颜色相同
+        if (dist < mergeThreshold && predColor === m.color) {
+          m.predictions.push(pred);
+          m.avgX = m.predictions.reduce((s, p) => s + p.x, 0) / m.predictions.length;
+          m.avgY = m.predictions.reduce((s, p) => s + p.y, 0) / m.predictions.length;
+          m.frameCount++;
+          found = true;
+          break;
+        }
+      }
+      
+      if (!found) {
+        merged.push({
+          predictions: [pred],
+          avgX: pred.x,
+          avgY: pred.y,
+          frameCount: 1,
+          color: predColor
+        });
+      }
+    }
+  }
+  
+  // 过滤只出现1帧且置信度低的
+  const filtered = merged.filter(m => {
+    const best = m.predictions.reduce((a, b) => a.confidence > b.confidence ? a : b);
+    return !(m.frameCount === 1 && best.confidence < 0.7);
+  });
+  
+  console.log(`[HoldDetector] 融合结果: ${merged.length} → ${filtered.length} 个岩点`);
+  return filtered;
+}
+
+// ============ 去除不同线路间的重合点 ============
+
+/**
+ * 去除不同颜色线路间的重合点
+ * 保留置信度更高的那个
+ */
+function removeOverlappingHolds(mergedHolds: MergedHold[]): MergedHold[] {
+  const result: MergedHold[] = [];
+  const removed = new Set<number>();
+  
+  for (let i = 0; i < mergedHolds.length; i++) {
+    if (removed.has(i)) continue;
+    
+    const hold1 = mergedHolds[i];
+    let keepThis = true;
+    
+    for (let j = i + 1; j < mergedHolds.length; j++) {
+      if (removed.has(j)) continue;
+      
+      const hold2 = mergedHolds[j];
+      
+      // 不同颜色的点才需要检查重合
+      if (hold1.color === hold2.color) continue;
+      
+      const dist = Math.sqrt(
+        Math.pow(hold1.avgX - hold2.avgX, 2) +
+        Math.pow(hold1.avgY - hold2.avgY, 2)
       );
       
-      if (existing) {
-        if (hold.confidence > existing.confidence) {
-          Object.assign(existing, hold);
-        }
-      } else {
-        merged.push({ ...hold, id: `G${id++}` });
-      }
-    }
-  }
-  
-  return merged;
-}
-
-/**
- * RGB 转 HSV
- */
-function rgbToHsv(r: number, g: number, b: number): HSVColor {
-  r /= 255; g /= 255; b /= 255;
-  const max = Math.max(r, g, b), min = Math.min(r, g, b);
-  const d = max - min;
-  let h = 0;
-  const s = max === 0 ? 0 : d / max;
-  const v = max;
-  
-  if (d !== 0) {
-    switch (max) {
-      case r: h = (g - b) / d + (g < b ? 6 : 0); break;
-      case g: h = (b - r) / d + 2; break;
-      case b: h = (r - g) / d + 4; break;
-    }
-    h /= 6;
-  }
-  return { h: h * 360, s, v };
-}
-
-/**
- * HSV 转颜色名
- */
-function hsvToColorName(hsv: HSVColor): string {
-  const { h, s, v } = hsv;
-  if (s < 0.15) return v > 0.8 ? 'white' : v < 0.3 ? 'black' : 'gray';
-  if (h < 15 || h >= 345) return 'red';
-  if (h < 45) return 'orange';
-  if (h < 75) return 'yellow';
-  if (h < 150) return 'green';
-  if (h < 195) return 'cyan';
-  if (h < 255) return 'blue';
-  if (h < 285) return 'purple';
-  return 'pink';
-}
-
-/**
- * 提取岩点颜色
- */
-function extractColors(imageData: ImageData, holds: DetectedHold[]): void {
-  const { data, width } = imageData;
-  
-  for (const hold of holds) {
-    const cx = Math.floor(hold.x + hold.width / 2);
-    const cy = Math.floor(hold.y + hold.height / 2);
-    const r = Math.floor(Math.min(hold.width, hold.height) / 3);
-    
-    let tr = 0, tg = 0, tb = 0, count = 0;
-    
-    for (let dy = -r; dy <= r; dy++) {
-      for (let dx = -r; dx <= r; dx++) {
-        const x = cx + dx, y = cy + dy;
-        if (x >= 0 && x < width && y >= 0 && y < imageData.height) {
-          const idx = (y * width + x) * 4;
-          tr += data[idx]; tg += data[idx + 1]; tb += data[idx + 2];
-          count++;
+      if (dist < OVERLAP_THRESHOLD) {
+        // 重合了，保留置信度更高的
+        const conf1 = Math.max(...hold1.predictions.map(p => p.confidence));
+        const conf2 = Math.max(...hold2.predictions.map(p => p.confidence));
+        
+        if (conf1 >= conf2) {
+          removed.add(j);
+          console.log(`[HoldDetector] 移除重合点: ${hold2.color} (被 ${hold1.color} 覆盖)`);
+        } else {
+          removed.add(i);
+          keepThis = false;
+          console.log(`[HoldDetector] 移除重合点: ${hold1.color} (被 ${hold2.color} 覆盖)`);
+          break;
         }
       }
     }
     
-    if (count > 0) {
-      hold.color = rgbToHsv(tr / count, tg / count, tb / count);
-      hold.colorName = hsvToColorName(hold.color);
+    if (keepThis) {
+      result.push(hold1);
     }
   }
+  
+  console.log(`[HoldDetector] 去重后: ${mergedHolds.length} → ${result.length} 个岩点`);
+  return result;
 }
 
+// ============ 线路分组与命名 ============
+
 /**
- * 按颜色聚类成线路
+ * 按颜色分组，过滤少于5个点的线路，并重新命名岩点
  */
-function clusterByColor(holds: DetectedHold[]): Route[] {
-  const routeMap = new Map<string, Route>();
+function groupHoldsToRoutes(mergedHolds: MergedHold[]): { routes: Route[]; allHolds: DetectedHold[] } {
+  // 按颜色分组
+  const colorGroups = new Map<string, MergedHold[]>();
   
-  for (const hold of holds) {
-    const color = hold.colorName || 'unknown';
-    if (!routeMap.has(color)) {
-      routeMap.set(color, {
+  for (const hold of mergedHolds) {
+    if (!colorGroups.has(hold.color)) {
+      colorGroups.set(hold.color, []);
+    }
+    colorGroups.get(hold.color)!.push(hold);
+  }
+  
+  const routes: Route[] = [];
+  const allHolds: DetectedHold[] = [];
+  
+  for (const [color, groupHolds] of colorGroups) {
+    // 过滤少于5个点的线路
+    if (groupHolds.length < MIN_HOLDS_PER_ROUTE) {
+      console.log(`[HoldDetector] 过滤线路: ${color} (只有 ${groupHolds.length} 个点, 少于 ${MIN_HOLDS_PER_ROUTE})`);
+      continue;
+    }
+    
+    // 按 Y 坐标排序 (从高到低，Y 小 = 位置高)
+    const sorted = [...groupHolds].sort((a, b) => a.avgY - b.avgY);
+    
+    const colorName = COLOR_NAMES[color] || color;
+    const routeHolds: DetectedHold[] = [];
+    
+    // 为每个岩点命名
+    for (let i = 0; i < sorted.length; i++) {
+      const m = sorted[i];
+      const best = m.predictions.reduce((a, b) => a.confidence > b.confidence ? a : b);
+      
+      const isTop = i === 0;  // 最高点是 TOP
+      const order = sorted.length - i;  // 从低到高: 1, 2, 3... TOP
+      
+      // 命名: yellow_1, yellow_2, ..., yellow_TOP
+      const id = isTop ? `${color}_TOP` : `${color}_${order}`;
+      
+      const hold: DetectedHold = {
+        id,
+        x: m.avgX,
+        y: m.avgY,
+        width: best.width,
+        height: best.height,
+        confidence: best.confidence,
         color,
-        colorHSV: hold.color || { h: 0, s: 0, v: 0 },
-        holds: []
-      });
+        colorName,
+        colorClass: best.class,
+        points: best.points || [],
+        isTop,
+        order
+      };
+      
+      routeHolds.push(hold);
+      allHolds.push(hold);
     }
-    routeMap.get(color)!.holds.push(hold);
+    
+    routes.push({
+      color,
+      colorName,
+      colorClass: routeHolds[0].colorClass,
+      holds: routeHolds,
+      topHold: routeHolds[0] || null,       // 第一个是最高的
+      startHold: routeHolds[routeHolds.length - 1] || null  // 最后一个是最低的
+    });
   }
   
-  // 确定每条线路的 Top 和 Start
-  const routes = Array.from(routeMap.values());
-  for (const route of routes) {
-    if (route.holds.length > 0) {
-      const sorted = [...route.holds].sort((a, b) => a.y - b.y);
-      route.topHold = sorted[0];
-      route.startHold = sorted[sorted.length - 1];
+  // 按岩点数量排序
+  routes.sort((a, b) => b.holds.length - a.holds.length);
+  
+  console.log(`[HoldDetector] 有效线路 ${routes.length} 条:`, 
+    routes.map(r => `${r.colorName}(${r.holds.length}个)`).join(', '));
+  
+  return { routes, allHolds };
+}
+
+// ============ 通过姿态确定线路 ============
+
+async function detectActiveRoute(
+  middleFrames: FrameSample[],
+  holds: DetectedHold[],
+  routes: Route[],
+  poseDetector: PoseDetector
+): Promise<Route | null> {
+  const colorVotes = new Map<string, number>();
+  
+  for (const frame of middleFrames) {
+    const canvas = frame.canvas;
+    const poses = await detectPoseFromCanvas(poseDetector, canvas);
+    
+    if (poses.length === 0) continue;
+    
+    const limbs = [
+      poses.find(p => p.name === 'left_wrist'),
+      poses.find(p => p.name === 'right_wrist'),
+      poses.find(p => p.name === 'left_ankle'),
+      poses.find(p => p.name === 'right_ankle'),
+    ].filter(p => p && (p.score || 0) > 0.3) as Keypoint[];
+    
+    for (const limb of limbs) {
+      const touchedHold = findNearestHold(limb, holds, 50);
+      if (touchedHold) {
+        const votes = colorVotes.get(touchedHold.color) || 0;
+        colorVotes.set(touchedHold.color, votes + 1);
+      }
     }
   }
   
-  return routes;
+  let maxVotes = 0;
+  let activeColor: string | null = null;
+  
+  for (const [color, votes] of colorVotes) {
+    if (votes > maxVotes) {
+      maxVotes = votes;
+      activeColor = color;
+    }
+  }
+  
+  if (activeColor) {
+    const activeRoute = routes.find(r => r.color === activeColor);
+    console.log(`[HoldDetector] 检测到当前线路: ${activeColor} (票数: ${maxVotes})`);
+    return activeRoute || null;
+  }
+  
+  console.log('[HoldDetector] 未能确定当前线路');
+  return null;
+}
+
+async function detectPoseFromCanvas(
+  poseDetector: PoseDetector,
+  canvas: HTMLCanvasElement
+): Promise<Keypoint[]> {
+  const img = new Image();
+  img.width = canvas.width;
+  img.height = canvas.height;
+  img.src = canvas.toDataURL();
+  
+  await new Promise(resolve => { img.onload = resolve; });
+  
+  if (!poseDetector.detector) return [];
+  
+  try {
+    const poses = await poseDetector.detector.estimatePoses(img as any);
+    if (poses.length > 0) {
+      return poses[0].keypoints.map(kp => ({
+        x: kp.x,
+        y: kp.y,
+        score: kp.score,
+        name: kp.name
+      }));
+    }
+  } catch (e) {
+    console.warn('[HoldDetector] 姿态检测失败:', e);
+  }
+  
+  return [];
+}
+
+function findNearestHold(
+  point: Keypoint,
+  holds: DetectedHold[],
+  maxDist: number
+): DetectedHold | null {
+  let nearest: DetectedHold | null = null;
+  let minDist = Infinity;
+  
+  for (const hold of holds) {
+    const dist = Math.sqrt(
+      Math.pow(point.x - hold.x, 2) + 
+      Math.pow(point.y - hold.y, 2)
+    );
+    
+    if (dist < minDist && dist < maxDist) {
+      minDist = dist;
+      nearest = hold;
+    }
+  }
+  
+  return nearest;
 }
 
 // ============ 主入口 ============
 
-/**
- * 完整的岩点检测 Pipeline
- */
-export async function detectHolds(video: HTMLVideoElement): Promise<HoldDetectionResult> {
-  console.log('[HoldDetector] 开始检测...');
+export interface DetectionOptions {
+  minConfidence?: number;
+  mergeThreshold?: number;
+  detectActiveRoute?: boolean;
+  minHoldsPerRoute?: number;  // 新增: 线路最少岩点数
+}
+
+export async function detectHolds(
+  video: HTMLVideoElement,
+  poseDetector?: PoseDetector,
+  options: DetectionOptions = {}
+): Promise<HoldDetectionResult> {
+  const {
+    minConfidence = 0.5,
+    mergeThreshold = 40,
+    detectActiveRoute: shouldDetectRoute = true
+  } = options;
   
-  // Step 1: 采样帧
-  const frames = await sampleFrames(video, 5);
-  console.log(`[HoldDetector] 采样 ${frames.length} 帧`);
+  console.log('[HoldDetector] ========== 开始岩点检测 ==========');
+  console.log(`[HoldDetector] 视频: ${video.videoWidth}x${video.videoHeight}, 时长: ${video.duration.toFixed(1)}s`);
+  
+  // Step 1: 帧采样
+  const frames = await sampleFrames(video);
   
   // Step 2: 多帧检测
-  const detections: DetectedHold[][] = [];
-  for (const frame of frames) {
-    detections.push(await yoloDetect(frame));
+  const frameResults = await detectMultiFrame(frames, minConfidence);
+  
+  // Step 3: 融合去重 (同颜色)
+  let mergedHolds = mergeDetections(frameResults, mergeThreshold);
+  
+  // Step 4: 去除不同颜色间的重合点
+  mergedHolds = removeOverlappingHolds(mergedHolds);
+  
+  // Step 5: 线路分组 (过滤少于5个点的线路 + 重新命名)
+  const { routes, allHolds } = groupHoldsToRoutes(mergedHolds);
+  
+  // Step 6: 检测当前线路 (可选)
+  let activeRoute: Route | null = null;
+  
+  if (shouldDetectRoute && poseDetector && routes.length > 0) {
+    const middleFrames = frames.filter(f => f.type === 'middle');
+    activeRoute = await detectActiveRoute(middleFrames, allHolds, routes, poseDetector);
   }
   
-  // Step 3: 融合去重
-  const merged = mergeDetections(detections);
-  console.log(`[HoldDetector] 检测到 ${merged.length} 个岩点`);
-  
-  // Step 4: 颜色提取
-  extractColors(frames[Math.floor(frames.length / 2)], merged);
-  
-  // Step 5: 聚类成线路
-  const routes = clusterByColor(merged);
-  console.log(`[HoldDetector] 识别 ${routes.length} 条线路`);
+  console.log('[HoldDetector] ========== 检测完成 ==========');
+  console.log(`[HoldDetector] 总计: ${allHolds.length} 个岩点, ${routes.length} 条有效线路`);
+  if (activeRoute) {
+    console.log(`[HoldDetector] 当前线路: ${activeRoute.colorName} (${activeRoute.holds.length} 个岩点)`);
+  }
   
   return {
-    allHolds: merged,
+    allHolds,
     routes,
+    activeRoute,
     frameWidth: video.videoWidth,
     frameHeight: video.videoHeight
   };
 }
 
-/**
- * 转换为旧版 Hold 格式 (兼容)
- */
-export function toHoldArray(result: HoldDetectionResult): Hold[] {
-  return result.allHolds.map(h => ({
-    id: h.id,
-    x: h.x + h.width / 2,
-    y: h.y + h.height / 2,
-    radius: Math.max(h.width, h.height) / 2,
-    color: [h.color?.h || 0, h.color?.s || 0, h.color?.v || 0] as [number, number, number]
-  }));
+// ============ 绘制工具 ============
+
+const COLOR_HEX: Record<string, string> = {
+  black: '#1a1a1a', blue: '#3b82f6', brown: '#a16207',
+  cyan: '#06b6d4', gray: '#6b7280', green: '#22c55e',
+  orange: '#f97316', pink: '#ec4899', purple: '#a855f7',
+  red: '#ef4444', white: '#f5f5f5', yellow: '#eab308',
+};
+
+export function drawDetectionResult(
+  ctx: CanvasRenderingContext2D,
+  result: HoldDetectionResult,
+  options: {
+    highlightRoute?: string;
+    showLabels?: boolean;
+    showPolygon?: boolean;
+  } = {}
+) {
+  const { highlightRoute, showLabels = true, showPolygon = true } = options;
+  
+  for (const hold of result.allHolds) {
+    const isHighlighted = !highlightRoute || hold.color === highlightRoute;
+    const color = COLOR_HEX[hold.color] || '#888888';
+    const alpha = isHighlighted ? 1 : 0.3;
+    
+    ctx.globalAlpha = alpha;
+    
+    // 绘制多边形
+    if (showPolygon && hold.points && hold.points.length > 0) {
+      ctx.beginPath();
+      ctx.moveTo(hold.points[0].x, hold.points[0].y);
+      for (const pt of hold.points.slice(1)) {
+        ctx.lineTo(pt.x, pt.y);
+      }
+      ctx.closePath();
+      ctx.fillStyle = color + '40';
+      ctx.fill();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = isHighlighted ? 3 : 1;
+      ctx.stroke();
+    } else {
+      // 绘制圆形
+      ctx.beginPath();
+      ctx.arc(hold.x, hold.y, Math.max(hold.width, hold.height) / 2, 0, Math.PI * 2);
+      ctx.fillStyle = color + '40';
+      ctx.fill();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    
+    // 绘制标签 (显示有意义的名称如 yellow_1, yellow_TOP)
+    if (showLabels && isHighlighted) {
+      const labelX = hold.x - hold.width / 2;
+      const labelY = hold.y - hold.height / 2 - 5;
+      
+      // 背景
+      ctx.fillStyle = 'rgba(0,0,0,0.7)';
+      const textWidth = ctx.measureText(hold.id).width;
+      ctx.fillRect(labelX - 2, labelY - 12, textWidth + 4, 14);
+      
+      // 文字
+      ctx.fillStyle = hold.isTop ? '#00ff00' : color;
+      ctx.font = hold.isTop ? 'bold 12px Arial' : '11px Arial';
+      ctx.fillText(hold.id, labelX, labelY);
+    }
+  }
+  
+  ctx.globalAlpha = 1;
+  
+  // 标记当前线路的 Top 和 Start
+  if (highlightRoute) {
+    const route = result.routes.find(r => r.color === highlightRoute);
+    if (route) {
+      if (route.topHold) {
+        drawMarker(ctx, route.topHold, '🎯 TOP', '#00ff00');
+      }
+      if (route.startHold) {
+        drawMarker(ctx, route.startHold, '🚀 START', '#ff6600');
+      }
+    }
+  }
+}
+
+function drawMarker(ctx: CanvasRenderingContext2D, hold: DetectedHold, label: string, color: string) {
+  // 标记圆圈
+  ctx.beginPath();
+  ctx.arc(hold.x, hold.y, 12, 0, Math.PI * 2);
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  
+  // 标签
+  ctx.fillStyle = color;
+  ctx.font = 'bold 14px Arial';
+  ctx.fillText(label, hold.x - 25, hold.y - hold.height / 2 - 20);
 }

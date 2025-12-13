@@ -2,7 +2,7 @@ import React, { useRef, useState, useEffect } from 'react'
 import { NavBar, Button, Toast, Grid, Card, List, Tag, ProgressBar } from 'antd-mobile'
 import { useNavigate } from 'react-router-dom'
 import { PoseDetector } from '../../logic/pose_detector'
-import { detectHolds, HoldDetectionResult, toHoldArray } from '../../logic/hold_detector'
+import { detectHolds, HoldDetectionResult, DetectedHold, drawDetectionResult } from '../../logic/hold_detector'
 import { ActionRecognizer } from '../../logic/action_recognizer'
 import { BetaGenerator } from '../../logic/beta_generator'
 import { DiffAnalyzer } from '../../logic/diff_analyzer'
@@ -71,9 +71,15 @@ const BetaAnalysis: React.FC = () => {
 
     // Phase 1: 岩点检测 (只做一次)
     setAnalysisStep('检测岩点...')
-    const holdData = await detectHolds(video)
-    const holds = toHoldArray(holdData)
+    const holdData = await detectHolds(video, poseDetector.current, {
+      minConfidence: 0.5,
+      detectActiveRoute: true
+    })
+    const holds = holdData.allHolds
     console.log(`检测到 ${holds.length} 个岩点, ${holdData.routes.length} 条线路`)
+    if (holdData.activeRoute) {
+      console.log(`当前线路: ${holdData.activeRoute.color}`)
+    }
 
     // Phase 2: 姿态分析
     setAnalysisStep('分析动作...')

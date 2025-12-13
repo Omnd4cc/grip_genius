@@ -1,0 +1,352 @@
+.climbing-daily-page {
+  min-height: 100vh;
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+}
+
+.climbing-daily-page .content {
+  padding: 12px;
+  padding-bottom: 40px;
+}
+
+/* 上传卡片 */
+.climbing-daily-page .upload-card {
+  border-radius: 12px;
+  margin-bottom: 12px;
+}
+
+.climbing-daily-page .upload-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.climbing-daily-page .upload-header .title {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.climbing-daily-page .upload-zone {
+  border: 2px dashed #d1d5db;
+  border-radius: 12px;
+  padding: 24px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.climbing-daily-page .upload-zone:hover {
+  border-color: #3b82f6;
+  background: #f0f9ff;
+}
+
+.climbing-daily-page .upload-zone:active {
+  background: #e0f2fe;
+}
+
+.climbing-daily-page .upload-icon {
+  font-size: 40px;
+  margin-bottom: 8px;
+}
+
+.climbing-daily-page .upload-text {
+  font-size: 14px;
+  color: #374151;
+}
+
+.climbing-daily-page .upload-hint {
+  font-size: 12px;
+  color: #9ca3af;
+  margin-top: 4px;
+}
+
+/* 视频列表 */
+.climbing-daily-page .video-list {
+  margin-top: 12px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.climbing-daily-page .video-item {
+  display: flex;
+  align-items: center;
+  padding: 8px 12px;
+  background: #f9fafb;
+  border-radius: 8px;
+  margin-bottom: 6px;
+}
+
+.climbing-daily-page .video-item .video-name {
+  flex: 1;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-right: 8px;
+}
+
+.climbing-daily-page .video-item .video-size {
+  font-size: 12px;
+  color: #9ca3af;
+  margin-right: 8px;
+}
+
+/* 进度卡片 */
+.climbing-daily-page .progress-card {
+  border-radius: 12px;
+  margin-bottom: 12px;
+}
+
+.climbing-daily-page .progress-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.climbing-daily-page .progress-text {
+  flex: 1;
+}
+
+.climbing-daily-page .progress-text > div:first-child {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.climbing-daily-page .progress-step {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.climbing-daily-page .progress-count {
+  text-align: center;
+  font-size: 12px;
+  color: #9ca3af;
+  margin-top: 8px;
+}
+
+/* 报告区域 */
+.climbing-daily-page .report-section {
+  animation: fadeInUp 0.3s ease;
+}
+
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* 总览卡片 */
+.climbing-daily-page .summary-card {
+  border-radius: 12px;
+  margin-bottom: 12px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+}
+
+.climbing-daily-page .report-date {
+  font-size: 18px;
+  font-weight: 600;
+  text-align: center;
+  margin-bottom: 16px;
+}
+
+.climbing-daily-page .stats-grid {
+  margin-bottom: 16px;
+}
+
+.climbing-daily-page .stat-box {
+  text-align: center;
+  padding: 16px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.climbing-daily-page .stat-box.success {
+  border-left: 4px solid #22c55e;
+}
+
+.climbing-daily-page .stat-box.fail {
+  border-left: 4px solid #ef4444;
+}
+
+.climbing-daily-page .stat-value {
+  font-size: 36px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.climbing-daily-page .stat-label {
+  font-size: 14px;
+  opacity: 0.9;
+  margin-top: 4px;
+}
+
+.climbing-daily-page .rate-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  margin-bottom: 12px;
+}
+
+.climbing-daily-page .rate-label {
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.climbing-daily-page .rate-bar .adm-progress-bar {
+  flex: 1;
+}
+
+.climbing-daily-page .rate-value {
+  font-size: 16px;
+  font-weight: 600;
+  min-width: 45px;
+  text-align: right;
+}
+
+.climbing-daily-page .summary-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 0;
+  font-size: 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.climbing-daily-page .summary-row .value {
+  font-weight: 600;
+}
+
+/* 线路卡片 */
+.climbing-daily-page .route-card {
+  border-radius: 12px;
+  margin-bottom: 12px;
+}
+
+.climbing-daily-page .color-dot {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+.climbing-daily-page .route-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.climbing-daily-page .route-name {
+  font-weight: 500;
+}
+
+.climbing-daily-page .route-stats {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+/* 攀爬记录卡片 */
+.climbing-daily-page .attempts-card {
+  border-radius: 12px;
+}
+
+.climbing-daily-page .attempt-thumb {
+  width: 60px;
+  height: 80px;
+  object-fit: cover;
+  border-radius: 6px;
+  background: #f3f4f6;
+}
+
+.climbing-daily-page .attempt-thumb.placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 24px;
+}
+
+.climbing-daily-page .attempt-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  color: #6b7280;
+  margin-top: 4px;
+}
+
+.climbing-daily-page .color-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  color: white;
+  font-size: 11px;
+}
+
+/* 攀爬记录展开区域 */
+.climbing-daily-page .attempt-item-wrapper {
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.climbing-daily-page .attempt-item-wrapper:last-child {
+  border-bottom: none;
+}
+
+.climbing-daily-page .attempt-images {
+  padding: 12px;
+  background: #f9fafb;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  animation: slideDown 0.2s ease;
+}
+
+@keyframes slideDown {
+  from { 
+    opacity: 0; 
+    max-height: 0;
+  }
+  to { 
+    opacity: 1; 
+    max-height: 800px;
+  }
+}
+
+.climbing-daily-page .image-card {
+  background: #fff;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.climbing-daily-page .image-card.success {
+  border: 2px solid #22c55e;
+}
+
+.climbing-daily-page .image-label {
+  padding: 8px 12px;
+  font-size: 14px;
+  font-weight: 600;
+  background: #f3f4f6;
+  color: #374151;
+}
+
+.climbing-daily-page .image-card.success .image-label {
+  background: linear-gradient(90deg, #22c55e, #16a34a);
+  color: white;
+}
+
+.climbing-daily-page .climbing-image,
+.climbing-daily-page .top-image {
+  width: 100%;
+  display: block;
+}
+
+.climbing-daily-page .no-images {
+  text-align: center;
+  padding: 20px;
+  color: #9ca3af;
+  font-size: 14px;
+}
+

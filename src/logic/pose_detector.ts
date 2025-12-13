@@ -10,10 +10,10 @@ export class PoseDetector {
     await tf.ready();
     const model = poseDetection.SupportedModels.MoveNet;
     const detectorConfig = {
-      modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING,
+      modelType: poseDetection.movenet.modelType.SINGLEPOSE_THUNDER,  // 更高精度
     };
     this.detector = await poseDetection.createDetector(model, detectorConfig);
-    console.log('MoveNet model loaded.');
+    console.log('MoveNet Thunder model loaded.');
   }
 
   async estimatePoses(video: HTMLVideoElement): Promise<Keypoint[]> {
