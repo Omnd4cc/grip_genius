@@ -173,8 +173,8 @@ export async function analyzeClimbVideo(
   
   console.log(`[ClimbReport] 有效帧: ${validFrames.map(f => f.time.toFixed(1) + 's').join(', ')}`);
   
-  // Step 4: 用有效帧判断线路
-  const activeRoute = await detectActiveRouteFromValidFrames(
+  // Step 4: 用有效帧判断线路颜色
+  let activeRoute = await detectActiveRouteFromValidFrames(
     video,
     poseDetector,
     holdData,
@@ -199,7 +199,24 @@ export async function analyzeClimbVideo(
     };
   }
   
-  console.log(`[ClimbReport] 确定线路: ${activeRoute.colorName} (${activeRoute.holds.length} 个岩点)`);
+  console.log(`[ClimbReport] 初步确定线路: ${activeRoute.colorName} (${activeRoute.holds.length} 个岩点)`);
+  
+  onProgress?.({ current: 45, total: 100, step: '优化线路岩点...', videoName });
+  
+  // Step 5: 针对确定的线路，优化岩点检测
+  // 一条线路通常有 8~15 个岩点
+  const optimizedHoldData = await optimizeRouteHolds(
+    video,
+    activeRoute.color,
+    holdData
+  );
+  
+  // 用优化后的数据更新 activeRoute
+  const optimizedRoute = optimizedHoldData.routes.find(r => r.color === activeRoute!.color);
+  if (optimizedRoute) {
+    activeRoute = optimizedRoute;
+    console.log(`[ClimbReport] 优化后线路: ${activeRoute.colorName} (${activeRoute.holds.length} 个岩点)`);
+  }
   
   onProgress?.({ current: 40, total: 100, step: '分析攀爬过程...', videoName });
   
@@ -262,6 +279,270 @@ export async function analyzeClimbVideo(
     climbingImage,
     topImage
   };
+}
+
+// ============ 线路优化常量 ============
+
+const OPTIMAL_HOLD_COUNT = { min: 8, max: 15 };  // 一条线路的理想岩点数量
+const MIN_HOLD_DISTANCE = 30;  // 岩点间最小距离 (像素)
+const OUTLIER_THRESHOLD = 2.5; // 离群点检测阈值 (标准差倍数)
+
+/**
+ * 针对确定的线路，智能优化岩点检测
+ * 
+ * 优化策略:
+ * 1. 去除重叠/太近的岩点 (保留置信度高的)
+ * 2. 去除水平方向的离群点
+ * 3. 确保岩点从起点到终点有合理的垂直分布
+ * 4. 综合评分筛选最优岩点
+ */
+async function optimizeRouteHolds(
+  video: HTMLVideoElement,
+  targetColor: string,
+  originalHoldData: HoldDetectionResult
+): Promise<HoldDetectionResult> {
+  const originalRoute = originalHoldData.routes.find(r => r.color === targetColor);
+  if (!originalRoute || originalRoute.holds.length === 0) {
+    return originalHoldData;
+  }
+  
+  let holds = [...originalRoute.holds];
+  const originalCount = holds.length;
+  
+  console.log(`[ClimbReport] 优化线路 ${targetColor}: 原始 ${originalCount} 个岩点`);
+  
+  // Step 1: 去除重叠/太近的岩点
+  holds = removeOverlappingHolds(holds);
+  console.log(`[ClimbReport]   去重叠后: ${holds.length} 个`);
+  
+  // Step 2: 去除水平方向的离群点
+  holds = removeHorizontalOutliers(holds);
+  console.log(`[ClimbReport]   去离群后: ${holds.length} 个`);
+  
+  // Step 3: 分析垂直分布，去除异常点
+  holds = optimizeVerticalDistribution(holds);
+  console.log(`[ClimbReport]   优化分布后: ${holds.length} 个`);
+  
+  // Step 4: 如果仍然太多，按综合评分筛选
+  if (holds.length > OPTIMAL_HOLD_COUNT.max) {
+    holds = selectByScore(holds, OPTIMAL_HOLD_COUNT.max);
+    console.log(`[ClimbReport]   评分筛选后: ${holds.length} 个`);
+  }
+  
+  // 重新命名
+  const optimizedHolds = renameHoldsInRoute(holds, targetColor);
+  
+  console.log(`[ClimbReport]   最终: ${originalCount} → ${optimizedHolds.length} 个岩点`);
+  
+  // 更新数据
+  return updateHoldData(originalHoldData, targetColor, optimizedHolds);
+}
+
+/**
+ * 去除重叠/太近的岩点，保留置信度高的
+ */
+function removeOverlappingHolds(holds: DetectedHold[]): DetectedHold[] {
+  const result: DetectedHold[] = [];
+  const removed = new Set<string>();
+  
+  // 按置信度排序，优先保留高置信度的
+  const sorted = [...holds].sort((a, b) => b.confidence - a.confidence);
+  
+  for (const hold of sorted) {
+    if (removed.has(hold.id)) continue;
+    
+    // 检查是否与已保留的岩点重叠
+    let isOverlapping = false;
+    for (const kept of result) {
+      const dist = Math.sqrt(
+        Math.pow(hold.x - kept.x, 2) + 
+        Math.pow(hold.y - kept.y, 2)
+      );
+      if (dist < MIN_HOLD_DISTANCE) {
+        isOverlapping = true;
+        break;
+      }
+    }
+    
+    if (!isOverlapping) {
+      result.push(hold);
+    }
+  }
+  
+  return result;
+}
+
+/**
+ * 去除水平方向的离群点
+ * 攀岩线路通常在一个相对窄的水平范围内
+ */
+function removeHorizontalOutliers(holds: DetectedHold[]): DetectedHold[] {
+  if (holds.length < 5) return holds;
+  
+  // 计算 X 坐标的中位数和标准差
+  const xValues = holds.map(h => h.x).sort((a, b) => a - b);
+  const median = xValues[Math.floor(xValues.length / 2)];
+  
+  const mean = xValues.reduce((a, b) => a + b, 0) / xValues.length;
+  const variance = xValues.reduce((sum, x) => sum + Math.pow(x - mean, 2), 0) / xValues.length;
+  const stdDev = Math.sqrt(variance);
+  
+  // 过滤离群点 (超过 2.5 个标准差)
+  return holds.filter(hold => {
+    const deviation = Math.abs(hold.x - median);
+    const isOutlier = deviation > stdDev * OUTLIER_THRESHOLD;
+    if (isOutlier) {
+      console.log(`[ClimbReport]     移除离群点: ${hold.id} (x=${hold.x.toFixed(0)}, 偏离=${deviation.toFixed(0)})`);
+    }
+    return !isOutlier;
+  });
+}
+
+/**
+ * 优化垂直分布
+ * 确保岩点从低到高有合理的分布，去除明显不合理的点
+ */
+function optimizeVerticalDistribution(holds: DetectedHold[]): DetectedHold[] {
+  if (holds.length < 5) return holds;
+  
+  // 按 Y 坐标排序 (从高到低)
+  const sorted = [...holds].sort((a, b) => a.y - b.y);
+  
+  // 计算相邻岩点的平均间距
+  const gaps: number[] = [];
+  for (let i = 1; i < sorted.length; i++) {
+    gaps.push(sorted[i].y - sorted[i - 1].y);
+  }
+  
+  if (gaps.length === 0) return holds;
+  
+  const avgGap = gaps.reduce((a, b) => a + b, 0) / gaps.length;
+  const maxAllowedGap = avgGap * 3; // 允许的最大间距
+  
+  // 检测是否有异常大的间距 (可能是分离的两组点)
+  // 保留主要的连续区域
+  let mainGroupStart = 0;
+  let mainGroupEnd = sorted.length - 1;
+  let maxGroupSize = 0;
+  
+  let currentStart = 0;
+  for (let i = 1; i < sorted.length; i++) {
+    if (gaps[i - 1] > maxAllowedGap) {
+      // 发现断裂，检查当前组的大小
+      const groupSize = i - currentStart;
+      if (groupSize > maxGroupSize) {
+        maxGroupSize = groupSize;
+        mainGroupStart = currentStart;
+        mainGroupEnd = i - 1;
+      }
+      currentStart = i;
+    }
+  }
+  
+  // 检查最后一组
+  const lastGroupSize = sorted.length - currentStart;
+  if (lastGroupSize > maxGroupSize) {
+    mainGroupStart = currentStart;
+    mainGroupEnd = sorted.length - 1;
+  }
+  
+  // 如果找到了显著的主要组，只保留它
+  if (mainGroupEnd - mainGroupStart + 1 >= holds.length * 0.6) {
+    return sorted.slice(mainGroupStart, mainGroupEnd + 1);
+  }
+  
+  return holds;
+}
+
+/**
+ * 按综合评分筛选岩点
+ * 评分考虑: 置信度 + 与其他岩点的空间关系
+ */
+function selectByScore(holds: DetectedHold[], targetCount: number): DetectedHold[] {
+  // 计算每个岩点的评分
+  const scored = holds.map(hold => {
+    // 基础分: 置信度 (0-1)
+    let score = hold.confidence;
+    
+    // 位置分: 优先保留中间区域的岩点
+    const yNormalized = hold.y / Math.max(...holds.map(h => h.y));
+    const positionScore = 1 - Math.abs(yNormalized - 0.5) * 0.5; // 中间位置得分更高
+    score += positionScore * 0.3;
+    
+    // 孤立惩罚: 如果附近没有其他岩点，降低分数
+    const nearbyCount = holds.filter(other => {
+      if (other.id === hold.id) return false;
+      const dist = Math.sqrt(
+        Math.pow(hold.x - other.x, 2) + 
+        Math.pow(hold.y - other.y, 2)
+      );
+      return dist < 100; // 100像素范围内
+    }).length;
+    
+    if (nearbyCount === 0) {
+      score *= 0.7; // 孤立点降低30%分数
+    }
+    
+    return { hold, score };
+  });
+  
+  // 按评分排序，保留最高的
+  scored.sort((a, b) => b.score - a.score);
+  
+  return scored.slice(0, targetCount).map(s => s.hold);
+}
+
+/**
+ * 更新岩点数据
+ */
+function updateHoldData(
+  holdData: HoldDetectionResult,
+  targetColor: string,
+  optimizedHolds: DetectedHold[]
+): HoldDetectionResult {
+  const sorted = [...optimizedHolds].sort((a, b) => a.y - b.y);
+  
+  const newRoutes = holdData.routes.map(r => {
+    if (r.color === targetColor) {
+      return {
+        ...r,
+        holds: optimizedHolds,
+        topHold: sorted[0] || null,
+        startHold: sorted[sorted.length - 1] || null
+      };
+    }
+    return r;
+  });
+  
+  const otherHolds = holdData.allHolds.filter(h => h.color !== targetColor);
+  const newAllHolds = [...otherHolds, ...optimizedHolds];
+  
+  return {
+    ...holdData,
+    allHolds: newAllHolds,
+    routes: newRoutes
+  };
+}
+
+/**
+ * 重新命名线路中的岩点 (从低到高: color_1, color_2, ..., color_TOP)
+ */
+function renameHoldsInRoute(holds: DetectedHold[], color: string): DetectedHold[] {
+  // 按 Y 坐标排序 (Y 小 = 位置高)
+  const sorted = [...holds].sort((a, b) => a.y - b.y);
+  
+  return sorted.map((hold, index) => {
+    const isTop = index === 0;
+    const order = sorted.length - index;
+    const id = isTop ? `${color}_TOP` : `${color}_${order}`;
+    
+    return {
+      ...hold,
+      id,
+      isTop,
+      order
+    };
+  });
 }
 
 // ============ 有效帧类型 ============

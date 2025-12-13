@@ -16,6 +16,7 @@ import {
 } from '../api/roboflow';
 import { PoseDetector } from './pose_detector';
 import { Keypoint } from '../types';
+import { correctColors, CorrectedPrediction } from './color_correction';
 
 // ============ 常量配置 ============
 
@@ -145,6 +146,71 @@ async function detectMultiFrame(
   }
   
   return results;
+}
+
+// ============ 颜色矫正 ============
+
+/**
+ * 对多帧检测结果应用颜色矫正
+ * 使用 K-Means 在 HSV 空间重新聚类，消除光照影响
+ */
+async function applyColorCorrection(
+  frameResults: RoboflowPrediction[][],
+  frames: FrameSample[]
+): Promise<RoboflowPrediction[][]> {
+  // 选择一帧用于颜色矫正 (优先选中间帧)
+  const middleFrameIdx = frames.findIndex(f => f.type === 'middle');
+  const frameIdx = middleFrameIdx >= 0 ? middleFrameIdx : 0;
+  const frame = frames[frameIdx];
+  
+  // 合并所有帧的检测结果作为输入
+  const allPredictions = frameResults.flat();
+  
+  if (allPredictions.length < 3) {
+    console.log('[HoldDetector] 检测结果太少，跳过颜色矫正');
+    return frameResults;
+  }
+  
+  try {
+    // 调用颜色矫正算法
+    const corrected = await correctColors(allPredictions, frame.canvas);
+    
+    // 建立原始预测到矫正结果的映射
+    const correctionMap = new Map<RoboflowPrediction, CorrectedPrediction>();
+    for (let i = 0; i < allPredictions.length; i++) {
+      correctionMap.set(allPredictions[i], corrected[i]);
+    }
+    
+    // 将矫正后的颜色应用回每帧结果
+    const correctedFrameResults: RoboflowPrediction[][] = [];
+    
+    for (const framePreds of frameResults) {
+      const correctedPreds = framePreds.map(pred => {
+        const correctedPred = correctionMap.get(pred);
+        if (correctedPred) {
+          // 更新颜色相关字段
+          const newClass = `${correctedPred.corrected_color}-hold`;
+          return {
+            ...pred,
+            class: newClass,
+            // 保留原始数据，添加矫正信息
+            _original_class: pred.class,
+            _route_id: correctedPred.route_id,
+            _route_hsv: correctedPred.route_hsv_center
+          } as RoboflowPrediction;
+        }
+        return pred;
+      });
+      correctedFrameResults.push(correctedPreds);
+    }
+    
+    console.log('[HoldDetector] 颜色矫正完成');
+    return correctedFrameResults;
+    
+  } catch (error) {
+    console.error('[HoldDetector] 颜色矫正失败:', error);
+    return frameResults;
+  }
 }
 
 // ============ 多帧融合 ============
@@ -454,7 +520,8 @@ export interface DetectionOptions {
   minConfidence?: number;
   mergeThreshold?: number;
   detectActiveRoute?: boolean;
-  minHoldsPerRoute?: number;  // 新增: 线路最少岩点数
+  minHoldsPerRoute?: number;  // 线路最少岩点数
+  enableColorCorrection?: boolean;  // 启用 K-Means 颜色矫正
 }
 
 export async function detectHolds(
@@ -465,7 +532,8 @@ export async function detectHolds(
   const {
     minConfidence = 0.5,
     mergeThreshold = 40,
-    detectActiveRoute: shouldDetectRoute = true
+    detectActiveRoute: shouldDetectRoute = true,
+    enableColorCorrection = true  // 默认启用颜色矫正
   } = options;
   
   console.log('[HoldDetector] ========== 开始岩点检测 ==========');
@@ -475,7 +543,13 @@ export async function detectHolds(
   const frames = await sampleFrames(video);
   
   // Step 2: 多帧检测
-  const frameResults = await detectMultiFrame(frames, minConfidence);
+  let frameResults = await detectMultiFrame(frames, minConfidence);
+  
+  // Step 2.5: 颜色矫正 (使用 K-Means 聚类)
+  if (enableColorCorrection && frames.length > 0) {
+    console.log('[HoldDetector] 执行颜色矫正...');
+    frameResults = await applyColorCorrection(frameResults, frames);
+  }
   
   // Step 3: 融合去重 (同颜色)
   let mergedHolds = mergeDetections(frameResults, mergeThreshold);

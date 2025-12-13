@@ -73,6 +73,15 @@ black-yellow-hold, yellow-purple-hold
 │         │                                                                   │
 │         ▼                                                                   │
 │   ┌─────────────────────────────────────────────────────────────────────┐   │
+│   │  Step 2.5: K-Means 颜色矫正 (消除光照影响)                            │   │
+│   │  - 提取每个岩点区域的 HSV 颜色特征                                    │   │
+│   │  - 使用 K-Means 在 (H, S) 空间重新聚类                               │   │
+│   │  - 矫正模型分类结果，消除光照/阴影导致的颜色误判                       │   │
+│   │  - 输出: 更新 class 字段 + route_id + route_hsv_center              │   │
+│   └─────────────────────────────────────────────────────────────────────┘   │
+│         │                                                                   │
+│         ▼                                                                   │
+│   ┌─────────────────────────────────────────────────────────────────────┐   │
 │   │  Step 3: 多帧融合校准                                                │   │
 │   │  - 位置接近 (< 40px) 且颜色相同 → 视为同一岩点                        │   │
 │   │  - 保留置信度最高的检测结果                                          │   │
@@ -289,11 +298,139 @@ drawDetectionResult(ctx, result, {
 
 ---
 
-## 8. 后续优化方向
+## 8. K-Means 颜色矫正算法
+
+### 8.1 问题背景
+
+由于光照、阴影等因素，Roboflow 模型对岩点颜色的分类可能不准确。例如：
+- 阴影下的黄色岩点可能被识别为棕色
+- 强光下的绿色岩点可能被识别为青色
+- 同一颜色的岩点可能被分到不同类别
+
+### 8.2 解决方案
+
+使用 K-Means 聚类算法在 HSV 颜色空间对岩点进行重新分组：
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  输入: RoboflowPrediction[] + 原始图像                           │
+└─────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  A1. 图像像素获取 (Canvas API)                                   │
+│  - 将图像绘制到 Canvas                                           │
+│  - 获取 ImageData                                                │
+└─────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  A2. 区域像素提取                                                │
+│  - 使用 BBox 或 Polygon 裁剪每个岩点区域                          │
+│  - 采样 ~500 像素/岩点 (性能优化)                                 │
+│  - RGB → HSV 转换                                                │
+└─────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  A3. 特征计算                                                    │
+│  - 过滤 V < 15 的暗像素 (阴影/背景)                               │
+│  - 计算平均 H (使用向量平均处理循环性)                            │
+│  - 计算平均 S                                                    │
+│  - 输出: [H, S] 特征向量                                         │
+└─────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  B1. 确定 K 值                                                   │
+│  - 参考 Roboflow 分类的独立类数                                   │
+│  - K = min(uniqueClasses, MAX_ROUTES=8, n/3)                    │
+└─────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  B2. K-Means 聚类                                                │
+│  - 初始化: K-Means++ (更稳定的初始质心)                           │
+│  - 距离度量: HSV 距离 (考虑 H 的循环性)                           │
+│  - 迭代收敛 (~50次)                                              │
+└─────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  C1-C3. 结果输出                                                 │
+│  - 分配 route_id (0 到 K-1)                                      │
+│  - 计算每个簇的 HSV 中心                                          │
+│  - 根据 HSV 中心命名颜色 (red/yellow/green...)                   │
+│  - 更新 prediction.class                                         │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 8.3 关键实现细节
+
+**1. 色相循环平均**
+
+色相 H 是循环值 (0°-360°)，不能直接算术平均。例如 350° 和 10° 的平均应该是 0°，而不是 180°。
+
+```typescript
+// 使用向量平均
+let sinSum = 0, cosSum = 0;
+for (const h of hues) {
+  sinSum += Math.sin(h * Math.PI / 180);
+  cosSum += Math.cos(h * Math.PI / 180);
+}
+const avgH = Math.atan2(sinSum / n, cosSum / n) * 180 / Math.PI;
+```
+
+**2. HSV 距离度量**
+
+```typescript
+function hsvDistance(a: [H, S], b: [H, S]): number {
+  let hDiff = Math.abs(a[0] - b[0]);
+  if (hDiff > 180) hDiff = 360 - hDiff;  // 循环处理
+  const sDiff = Math.abs(a[1] - b[1]);
+  return Math.sqrt(hDiff * hDiff + sDiff * sDiff * 0.5);
+}
+```
+
+**3. 暗像素过滤**
+
+V < 15 的像素被视为阴影或背景，不参与颜色计算。
+
+### 8.4 使用方式
+
+颜色矫正已集成到 `detectHolds` 函数中，默认启用：
+
+```typescript
+// 启用颜色矫正 (默认)
+const result = await detectHolds(video, poseDetector, {
+  enableColorCorrection: true
+});
+
+// 禁用颜色矫正
+const result = await detectHolds(video, poseDetector, {
+  enableColorCorrection: false
+});
+```
+
+也可以单独使用：
+
+```typescript
+import { correctColors } from './logic/color_correction';
+
+const corrected = await correctColors(predictions, canvasOrImage);
+// corrected[i].route_id: 聚类结果
+// corrected[i].route_hsv_center: 线路代表色
+// corrected[i].corrected_color: 矫正后的颜色名
+```
+
+---
+
+## 9. 后续优化方向
 
 - [x] 集成 Roboflow API 进行岩点检测
 - [x] 多帧融合提高检测准确率
 - [x] 通过姿态检测自动确定当前线路
+- [x] K-Means 颜色矫正 (消除光照影响)
 - [ ] 优化 API 调用频率 (缓存/批量)
 - [ ] 添加手动修正功能
 - [ ] 支持离线模型 (ONNX)
@@ -301,8 +438,10 @@ drawDetectionResult(ctx, result, {
 
 ---
 
-## 9. 参考资源
+## 10. 参考资源
 
 - [Roboflow API](https://docs.roboflow.com/)
 - [MoveNet Model](https://www.tensorflow.org/hub/tutorials/movenet)
 - [TensorFlow.js](https://www.tensorflow.org/js)
+- [K-Means Clustering](https://en.wikipedia.org/wiki/K-means_clustering)
+- [HSV Color Space](https://en.wikipedia.org/wiki/HSL_and_HSV)

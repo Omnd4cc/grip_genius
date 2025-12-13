@@ -373,3 +373,8 @@ function colorToHex(color: string): string {
   };
   return map[color] || '#888888';
 }
+
+// ============ 颜色矫正 (重导出) ============
+
+export { correctColors, COLOR_NAMES as COLOR_NAMES_CN } from '../logic/color_correction';
+export type { CorrectedPrediction } from '../logic/color_correction';
